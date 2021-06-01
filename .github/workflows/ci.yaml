@@ -1,6 +1,6 @@
 name: 'CD: Cloudformation Policy Check'
 on:
-  workflow_dispatch:
+  pull-request
 
 jobs:
   cfn-lint:
