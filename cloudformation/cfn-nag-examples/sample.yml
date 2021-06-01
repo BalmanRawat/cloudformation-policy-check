@@ -1,0 +1,36 @@
+Parameters:
+  VpcId:
+    Type: String
+    Default: vpc-123458cd
+Resources:
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Sample Security Group
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: "-1"
+        - availability-zone: us-east-1
+      VpcId:
+        Ref: VpcId
+  SampleIAMPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: root
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: 's3*'
+            Resource: '*'
+          - Effect: Allow
+            Action: 'sns*'
+            Resource: '*'
+          - Effect: Allow
+            Action: 'sns*'
+            NotResource: '*'
+          - Effect: Allow
+            Action: 'cloudwatch*'
+            NotResource: '*'
+            Conditions:
+              instanceTag: "one-two"
