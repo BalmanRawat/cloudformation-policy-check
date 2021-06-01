@@ -18,3 +18,4 @@ jobs:
         uses: stelligent/cfn_nag@master
         with:
           input_path: cloudformation/cfn-nag-examples
+          extra_args: --template-pattern '*.yaml' --ignore-fatal --output-format colortxt
