@@ -14,7 +14,7 @@ jobs:
       - name: Run the Linter
         run: |
           cfn-lint -t cloudformation/cfn-lint-examples/service.yaml -f pretty
-      # - name: CFN Nagging
-      #   uses: stelligent/cfn_nag@master
-      #   with:
-      #     input_path: cfns
+      - name: CFN Nagging
+        uses: stelligent/cfn_nag@master
+        with:
+          input_path: cloudformation/cfn-nag-examples
