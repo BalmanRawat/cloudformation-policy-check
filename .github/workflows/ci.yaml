@@ -5,7 +5,7 @@ on:
 jobs:
   cfn-lint:
     runs-on: ubuntu-latest
-    name: 'CloudFormation Linting..'
+    name: 'CloudFormation Linting...'
     steps:
       - name: Checkout the repo
         uses: actions/checkout@v2
