@@ -1,0 +1,20 @@
+name: 'CD: Cloudformation Policy Check'
+on:
+  workflow_dispatch:
+
+jobs:
+  cfn-lint:
+    runs-on: ubuntu-latest
+    name: 'CloudFormation Linting..'
+    steps:
+      - name: Checkout the repo
+        uses: actions/checkout@v2
+      - name: Setup Cloud Formation Linter with Latest Version
+        uses: scottbrenner/cfn-lint-action@v2
+      - name: Run the Linter
+        run: |
+          cfn-lint -t cloudformation/cfn-lint-examples/service.yaml -f pretty
+      # - name: CFN Nagging
+      #   uses: stelligent/cfn_nag@master
+      #   with:
+      #     input_path: cfns

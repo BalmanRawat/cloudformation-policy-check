@@ -1,0 +1,488 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Service Definition
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: A label for the environment that this cloudformation will be part of
+
+  SubSystem:
+    Type: String
+    Description: Subsystem Code
+    AllowedPattern: "^[a-z]+$"
+
+  ServiceName:
+    Type: String
+    Description: Name of the service under particular subsystem
+
+  ALBType:
+    Type: String
+    Description: Type of global ALB
+    Default: PrivateALB
+    AllowedValues:
+      - PrivateALB
+      - PublicALB
+
+  EnvironmentType:
+    Default: nonproduction
+    Description: Type of the environment for this stack
+    Type: String
+    AllowedValues:
+      - nonproduction
+      - production
+
+  ServiceVersion:
+    Default: 0.0.0
+    Type: String
+
+  DockerRepoUrl:
+    Type: String
+    Description: The url of a docker image that contains the application process that will handle the traffic for this service
+
+  AppPort:
+    Type: Number
+    Description: What port number the application inside the docker container is binding to
+
+  ContainerCpu:
+    Type: Number
+    Default: 256
+    Description: How much CPU to give the container. 1024 is 1 CPU
+
+  ContainerMemory:
+    Type: Number
+    Default: 512
+    Description: How much memory in megabytes to give the container
+
+  UrlPattern:
+    Type: String
+    Description: A path on the public load balancer that this service should be connected to.
+
+  Priority:
+    Type: Number
+    # NOTE: When subsystem services are created, we should come up
+    # with setting priority; once set for a service, changing is a destructive process
+    # CFN seem to freeze sometimes too when we exchange priority among services for the path
+    Description: The priority for the routing rule added to the load balancer. This applies for our case as we have multiple services which are going to served under one domain
+
+  DesiredCount:
+    Type: Number
+    Default: 1
+    Description: How many copies of the service task to run
+
+  HealthCheckPath:
+    Type: String
+    Description: Health check path
+
+  MinCapacity:
+    Type: Number
+    Default: 1
+    Description: Minimum Desired Capacity of the ECS Task
+
+  MaxCapacity:
+    Type: Number
+    Default: 5
+    Description: Maximum Desired Capacity of the ECS Task
+
+  #https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-ecs-service-deploymentconfiguration.html    
+  MinimumHealthyPercent:
+    Type: Number
+    Default: 100
+    Description: Lower limit on number of ECS Task to keep running during ECS rolling deployment
+
+  MaximumPercent:
+    Type: Number
+    Default: 200
+    Description: Upper limit on number of ECS Task to keep running during ECS rolling deployment
+
+Conditions:
+  nonproduction: !Equals [ !Ref EnvironmentType, nonproduction ]
+
+Resources:
+  ContainerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Access to the Fargate containers from load balancer
+      VpcId:
+        Fn::ImportValue: !Join [':', [!Ref EnvironmentName, 'VPC']]
+      SecurityGroupIngress:
+        CidrIp:
+          Fn::ImportValue: !Join [':', [!Ref EnvironmentName, 'CidrBlock']]
+        IpProtocol: tcp
+        FromPort: !Ref AppPort
+        ToPort: !Ref AppPort
+      Tags:
+        - Key: ResourceType
+          Value: securitygroup
+        - Key: SubSystem
+          Value: !Ref SubSystem
+        - Key: EnvironmentType
+          Value: !Ref EnvironmentType
+        - Key: Owner
+          Value: sputnik-team1@cloudfactory.com
+        - Key: CostCenter
+          Value: engineering
+        - Key: Platform
+          Value: sputnik
+
+  ContainerSecurityGroupIngressFromLoadBalancer:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Ingress from the public ALB
+      GroupId: !Ref ContainerSecurityGroup
+      IpProtocol: '-1'
+      SourceSecurityGroupId:
+        Fn::ImportValue:
+          !Join [':', [!Ref EnvironmentName, !Ref ALBType, 'LoadBalancerSecurityGroup']]
+
+  ContainerSecurityGroupIngressFromSelf:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Ingress from other containers in the same security group
+      GroupId: !Ref ContainerSecurityGroup
+      IpProtocol: '-1'
+      SourceSecurityGroupId: !Ref ContainerSecurityGroup
+
+  # A log group for storing the container logs for this service
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['/', ['/aws', 'ecs', !Ref EnvironmentName, !Ref SubSystem, !Ref ServiceName]]
+      RetentionInDays: 7
+
+  # NOTE: ServiceRole is something specific to current service but most of what
+  # a task would need come from ECSTaskExecutionRole
+  ServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: "ecs-tasks.amazonaws.com"
+          Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+      - PolicyName: !Sub ${AWS::StackName}-service-policy
+        # NOTE: This is dummy policy for the microservice
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+              - "dynamodb:*"
+            #FIXME: This needs to fine grained rather than blanket *
+            Resource: '*'
+
+  # The task definition. This is a simple metadata description of what
+  # container to run, and what resource requirements it has.
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      # Family: !Join ['-', [!Ref EnvironmentName,!Ref SubSystem, !Ref ServiceName]]
+      Family: !Ref ServiceName
+      Cpu: !Ref ContainerCpu
+      Memory: !Ref ContainerMemory
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn:
+        Fn::ImportValue:
+          !Join [':', [!Ref EnvironmentName, !Ref SubSystem, 'ECSTaskExecutionRole']]
+      TaskRoleArn: !Ref ServiceRole
+      ContainerDefinitions:
+        - Name: !Ref ServiceName
+          Cpu: !Ref ContainerCpu
+          Memory: !Ref ContainerMemory
+          Image: !Join [':', [!Ref DockerRepoUrl, !Ref ServiceVersion]]
+          Environment:
+            - Name: REGION
+              Value: !Ref AWS::Region
+            - Name: ENV_TYPE
+              Value: !Ref EnvironmentType
+            - Name: CONFIG_TABLE
+              Value:
+                Fn::ImportValue:
+                  !Sub ${EnvironmentName}:${SubSystem}:ConfigsDynamoDBTable:v1
+            - Name: COLLECTOR_SERVICE_URL
+              Value:
+                Fn::Sub:
+                  - http://api.sop-${SopEnv}.${Domain}/api/traces
+                  - SopEnv: 
+                      Fn::If: [nonproduction, 'nonprod', 'prod']
+                    Domain:
+                      Fn::ImportValue: !Join [':', [!Ref EnvironmentName, 'DomainName']]
+          PortMappings:
+            - ContainerPort: !Ref AppPort
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: !Ref ServiceName
+
+  # Create a service discovery service in the private service domain
+  ServiceDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: !Sub ${ServiceName}-${SubSystem}
+      DnsConfig:
+        DnsRecords: # [{Type: A, TTL: "10"}]
+        - Type: A
+          TTL: 10
+        - Type: SRV
+          TTL: 10
+        NamespaceId:
+          Fn::ImportValue:
+            !Join [':', [!Ref EnvironmentName, 'ServiceDiscovery']]
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+  # The service. The service is a resource which allows you to run multiple
+  # copies of a type of task, and gather up their logs and metrics, as well
+  # as monitor the number of running tasks and replace any that have crashed
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - HTTPRule
+      # - HTTPSRule
+    Properties:
+      PlatformVersion: "1.4.0"
+      ServiceName: !Join ['-', [!Ref EnvironmentName, !Ref SubSystem, !Ref ServiceName, 'v2']]
+      Cluster:
+        Fn::ImportValue:
+          !Join [':', [!Ref EnvironmentName, !Ref SubSystem, 'ClusterName']]
+      LaunchType: FARGATE
+      DeploymentConfiguration:
+        MaximumPercent: !Ref MaximumPercent
+        MinimumHealthyPercent: !Ref MinimumHealthyPercent
+      DesiredCount: !Ref DesiredCount
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups: [!Ref ContainerSecurityGroup]
+          Subnets:
+            - Fn::ImportValue: !Join [ ':', [ !Ref EnvironmentName, !Ref SubSystem, 'StatelessSubnetAZ1Private' ]]
+            - Fn::ImportValue: !Join [ ':', [ !Ref EnvironmentName, !Ref SubSystem, 'StatelessSubnetAZ2Private' ]]
+      TaskDefinition: !Ref TaskDefinition
+      ServiceRegistries:
+        - RegistryArn: !GetAtt ServiceDiscovery.Arn
+          Port: !Ref AppPort
+      LoadBalancers:
+        - ContainerName: !Ref ServiceName
+          ContainerPort: !Ref AppPort
+          TargetGroupArn: !Ref TargetGroup
+
+  # A target group. This is used for keeping track of all the tasks, and
+  # what IP addresses / port numbers they have.
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: !Ref HealthCheckPath
+      Matcher:
+        HttpCode: 200,301,404
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      TargetType: ip
+      # NOTE: TargetGroup name can not be more than 32 characters.
+      # Name: !Join ['-', [!Ref EnvironmentName, !Ref SubSystem, !Ref ServiceName]]
+      Port: !Ref AppPort
+      Protocol: HTTP
+      UnhealthyThresholdCount: 3
+      TargetGroupAttributes:
+        - Key: stickiness.enabled
+          Value: true
+        - Key: deregistration_delay.timeout_seconds
+          Value: 45
+      VpcId:
+        Fn::ImportValue: !Join [':', [!Ref EnvironmentName, 'VPC']]
+      Tags:
+        - Key: ResourceType
+          Value: elasticloadbalancer
+        - Key: SubSystem
+          Value: !Ref SubSystem
+        - Key: EnvironmentType
+          Value: !Ref EnvironmentType
+        - Key: Owner
+          Value: sputnik-team1@cloudfactory.com
+        - Key: CostCenter
+          Value: engineering
+        - Key: Platform
+          Value: sputnik
+
+  # Create rules to forward both HTTP and HTTPS traffic to the service's
+  # target group. The service itself will handle redirecting HTTP traffic
+  # to HTTPS
+  HTTPRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - TargetGroupArn: !Ref TargetGroup
+          Type: 'forward'
+      Conditions:
+        - Field: path-pattern
+          Values: [!Ref UrlPattern]
+      ListenerArn:
+        Fn::ImportValue:
+          !Join [':', [!Ref EnvironmentName, !Ref ALBType, 'ListenerHTTP']]
+      Priority: !Ref Priority
+
+  # HTTPSRule:
+  #   Type: AWS::ElasticLoadBalancingV2::ListenerRule
+  #   Properties:
+  #     Actions:
+  #       - TargetGroupArn: !Ref TargetGroup
+  #         Type: 'forward'
+  #     Conditions:
+  #       - Field: path-pattern
+  #         Values: [!Ref Path]
+  #     ListenerArn:
+  #       Fn::ImportValue:
+  #         !Join [':', [!Ref EnvironmentName, !Ref SubSystem, 'ListenerHTTPS']]
+  #     Priority: !Ref Priority
+
+  # Enable autoscaling for this service
+  ScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      ServiceNamespace: 'ecs'
+      ScalableDimension: 'ecs:service:DesiredCount'
+      ResourceId:
+        Fn::Join:
+          - '/'
+          - - service
+            - Fn::ImportValue: !Join [':', [!Ref EnvironmentName, !Ref SubSystem, 'ClusterName']]
+            - !GetAtt 'Service.Name'
+      MinCapacity: !Ref MinCapacity
+      MaxCapacity: !Ref MaxCapacity
+      RoleARN:
+        Fn::ImportValue:
+          !Join [':', [!Ref EnvironmentName, !Ref SubSystem, 'AutoscalingRole']]
+
+  # Create scaling policies for the service
+  ScaleDownPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    DependsOn: ScalableTarget
+    Properties:
+      PolicyName:
+        Fn::Join:
+          - '/'
+          - - scale
+            - !Ref EnvironmentName
+            - !Ref SubSystem
+            - !GetAtt 'Service.Name'
+            - down
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref ScalableTarget
+      StepScalingPolicyConfiguration:
+        AdjustmentType: 'ChangeInCapacity'
+        StepAdjustments:
+          - MetricIntervalUpperBound: 0
+            ScalingAdjustment: -1
+        MetricAggregationType: 'Average'
+        Cooldown: 60
+
+  ScaleUpPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    DependsOn: ScalableTarget
+    Properties:
+      PolicyName:
+        Fn::Join:
+          - '/'
+          - - scale
+            - !Ref EnvironmentName
+            - !Ref SubSystem
+            - !GetAtt 'Service.Name'
+            - up
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref ScalableTarget
+      StepScalingPolicyConfiguration:
+        AdjustmentType: 'ChangeInCapacity'
+        StepAdjustments:
+          - MetricIntervalLowerBound: 0
+            MetricIntervalUpperBound: 15
+            ScalingAdjustment: 1
+          - MetricIntervalLowerBound: 15
+            MetricIntervalUpperBound: 25
+            ScalingAdjustment: 2
+          - MetricIntervalLowerBound: 25
+            ScalingAdjustment: 3
+        MetricAggregationType: 'Average'
+        Cooldown: 60
+
+  # Create alarms to trigger these policies
+  LowCpuUsageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName:
+        Fn::Join:
+          - '-'
+          - - low-cpu
+            - !Ref EnvironmentName
+            - !Ref ServiceName
+      AlarmDescription:
+        Fn::Join:
+          - ' '
+          - - "Low CPU utilization for service"
+            - !Ref ServiceName
+            - "in stack"
+            - !Ref EnvironmentName
+      MetricName: CPUUtilization
+      Namespace: AWS/ECS
+      Dimensions:
+        - Name: ServiceName
+          # Value: !Ref ServiceName
+          Value: !GetAtt  'Service.Name'
+
+        - Name: ClusterName
+          Value:
+            Fn::ImportValue: !Join [':', [!Ref EnvironmentName, !Ref SubSystem, 'ClusterName']]
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 20
+      ComparisonOperator: LessThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref ScaleDownPolicy
+
+  HighCpuUsageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      # AlarmName: !Join ['-', ['high-cpu', !Ref EnvironmentName, !Ref SubSystem, !GetAtt Service.Name]]
+        # Fn::Join:
+        #   - '-'
+        #   - - high-cpu
+        #     - !Ref EnvironmentName
+        #     - !Ref ServiceName
+      AlarmDescription:
+        Fn::Join:
+          - ' '
+          - - "High CPU utilization for service"
+            - !Ref ServiceName
+            - "in stack"
+            - !Ref EnvironmentName
+      MetricName: CPUUtilization
+      Namespace: AWS/ECS
+      Dimensions:
+        - Name: ServiceName
+          Value: !GetAtt 'Service.Name'
+        - Name: ClusterName
+          Value:
+            Fn::ImportValue: !Join [':', [!Ref EnvironmentName, !Ref SubSystem, 'ClusterName']]
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 70
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref ScaleUpPolicy
+
+Outputs:
+  ServiceURL:
+    Description: The url of the Config API
+    Value:
+      Fn::Sub:
+        - "${ClusterUrl}/config"
+        -  ClusterUrl:
+            Fn::ImportValue: !Join [':', [!Ref EnvironmentName, !Ref ALBType, 'Url']]
+    Export:
+      Name: !Join [ ':', [ !Ref EnvironmentName, !Ref ServiceName, 'ServiceUrl' ] ]
