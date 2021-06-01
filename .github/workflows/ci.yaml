@@ -19,3 +19,12 @@ jobs:
         with:
           input_path: cloudformation/cfn-nag-examples
           extra_args: --template-pattern '*.yaml' --ignore-fatal --output-format colortxt
+      - name: Setup CFN Guard
+        steps:
+          - curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/aws-cloudformation/cloudformation-guard/main/install-guard.sh | sh
+          - export PATH=$PATH:~/.guard/bin
+       - name: Poilcy check with CFN Guard
+        steps:
+          - cfn-guard validate -d cloudformation/cfn-guard-examples/deployment-safety/service.yaml -r cloudformation/cfn-
+guard-examples/deployment-safety/ecs-taskdef.guard
+
